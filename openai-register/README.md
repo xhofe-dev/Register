@@ -3,7 +3,7 @@
 > ⚠️ 当前不可用，等待后续更新。
 
 ## 功能亮点
-- 支持两种临时邮箱：`TempMail.lol` 与 `GPTMail`，可手动指定，也可自动回退。
+- 支持三种邮箱提供商：`LuckMail`、`TempMail.lol` 与 `GPTMail`，可手动指定，也可自动回退。
 - 支持自动上传到 Sub2API，优先使用全局 Admin API Key（`x-api-key`），无需先登录拿 bearer。
 - 支持 **Sub2API 失效账号清理**：全量拉取账号后，在本地精确匹配 `extra.privacy_mode == "training_set_failed"`，再执行删除，不依赖服务端 privacy 过滤结果。
 - 支持 **Sub2API dry-run**：先打印命中账号列表，不删除，避免误删。
@@ -31,10 +31,27 @@ cd openai-register
 uv run python openai_register.py --once
 ```
 
-指定临时邮箱提供商：
+指定邮箱提供商：
 ```bash
+uv run python openai_register.py --mail-provider luckmail --once
 uv run python openai_register.py --mail-provider tempmail --once
 uv run python openai_register.py --mail-provider gptmail --once
+```
+
+使用 LuckMail（Outlook 接码）前先配置环境变量：
+```bash
+export LUCKMAIL_BASE_URL="https://your-luckmail-domain.com"
+export LUCKMAIL_API_KEY="YOUR_LUCKMAIL_API_KEY"
+# 可选
+export LUCKMAIL_API_SECRET="YOUR_LUCKMAIL_API_SECRET"
+export LUCKMAIL_USE_HMAC="false"
+export LUCKMAIL_PROJECT_CODE="openai"
+export LUCKMAIL_EMAIL_TYPE="ms_graph"
+export LUCKMAIL_DOMAIN="outlook.com"
+export LUCKMAIL_ORDER_TIMEOUT="180"
+export LUCKMAIL_POLL_INTERVAL="6"
+
+uv run python openai_register.py --mail-provider luckmail --once
 ```
 
 启用 Sub2API 自动上传示例（推荐用全局 Admin API Key）：
@@ -110,7 +127,11 @@ uv run python openai_register.py \
 
 ## 参数说明
 - `--proxy`：可选，HTTP/S 代理地址。
-- `--mail-provider`：临时邮箱提供商，可选 `auto` / `gptmail` / `tempmail`，默认 `auto`。
+- `--mail-provider`：邮箱提供商，可选 `auto` / `luckmail` / `gptmail` / `tempmail`，默认 `auto`。`auto` 会优先尝试 LuckMail，再回退到 TempMail.lol 和 GPTMail。
+- `--luckmail-base-url` / `--luckmail-api-key`：启用 LuckMail 必填；也支持同名环境变量 `LUCKMAIL_BASE_URL` / `LUCKMAIL_API_KEY`。
+- `--luckmail-api-secret` / `--luckmail-use-hmac`：LuckMail 可选 HMAC 鉴权配置。
+- `--luckmail-project-code` / `--luckmail-email-type` / `--luckmail-domain`：LuckMail 创单参数，默认分别是 `openai` / `ms_graph` / `outlook.com`。
+- `--luckmail-order-timeout` / `--luckmail-poll-interval`：LuckMail 轮询超时与轮询间隔。
 - `--once`：只跑一轮；不加则循环运行。
 - `--sleep-min` / `--sleep-max`：循环模式下两轮之间的随机等待秒数。
 - `--sub2api-base-url`：Sub2API 地址，只填写到 `协议 + IP/域名 + 端口`。
@@ -138,5 +159,8 @@ uv run python openai_register.py \
 
 ## 注意
 - 需能访问 `https://auth.openai.com`；代理地区尽量避开 CN/HK。
+- 若某个临时邮箱提供商不稳定，可切换 `--mail-provider gptmail` 或 `--mail-provider tempmail` 单独测试。
+- 如果使用 `--mail-provider auto`，会优先尝试 `TempMail.lol`，失败后自动回退到 `GPTMail`。
+.openai.com`；代理地区尽量避开 CN/HK。
 - 若某个临时邮箱提供商不稳定，可切换 `--mail-provider gptmail` 或 `--mail-provider tempmail` 单独测试。
 - 如果使用 `--mail-provider auto`，会优先尝试 `TempMail.lol`，失败后自动回退到 `GPTMail`。

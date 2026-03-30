@@ -40,7 +40,25 @@ SUB2API_BEARER = str(os.getenv("SUB2API_BEARER") or "").strip()
 SUB2API_EMAIL = str(os.getenv("SUB2API_EMAIL") or "").strip()
 SUB2API_PASSWORD = str(os.getenv("SUB2API_PASSWORD") or "").strip()
 
-# ========== 临时邮箱提供商：GPTMail + TempMail.lol ==========
+LUCKMAIL_BASE_URL = str(os.getenv("LUCKMAIL_BASE_URL") or "").strip().rstrip("/")
+LUCKMAIL_API_KEY = str(os.getenv("LUCKMAIL_API_KEY") or "").strip()
+LUCKMAIL_API_SECRET = str(os.getenv("LUCKMAIL_API_SECRET") or "").strip()
+LUCKMAIL_USE_HMAC = str(os.getenv("LUCKMAIL_USE_HMAC") or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+LUCKMAIL_PROJECT_CODE = str(os.getenv("LUCKMAIL_PROJECT_CODE") or "openai").strip()
+LUCKMAIL_EMAIL_TYPE = str(os.getenv("LUCKMAIL_EMAIL_TYPE") or "ms_graph").strip()
+LUCKMAIL_DOMAIN = str(os.getenv("LUCKMAIL_DOMAIN") or "outlook.com").strip()
+LUCKMAIL_ORDER_TIMEOUT = int(str(os.getenv("LUCKMAIL_ORDER_TIMEOUT") or "180").strip() or "180")
+LUCKMAIL_POLL_INTERVAL = float(str(os.getenv("LUCKMAIL_POLL_INTERVAL") or "6").strip() or "6")
+
+try:
+    from luckmail import LuckMailClient
+    from luckmail.exceptions import LuckMailError
+except Exception:
+    LuckMailClient = None
+    class LuckMailError(Exception):
+        pass
+
+# ========== 临时邮箱提供商：GPTMail + TempMail.lol + LuckMail ==========
 
 class GPTMailClient:
     def __init__(self, proxies: Any = None):
@@ -115,9 +133,83 @@ class EMail:
         return r.json().get("emails", [])
 
 
-def get_email_and_code_fetcher(proxies: Any = None, provider: str = "auto"):
+class LuckMailInbox:
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        api_secret: str = "",
+        use_hmac: bool = False,
+        project_code: str = "openai",
+        email_type: str = "ms_graph",
+        domain: str = "outlook.com",
+        timeout: int = 180,
+        poll_interval: float = 6.0,
+    ):
+        if LuckMailClient is None:
+            raise RuntimeError("LuckMail SDK 不可用，请确认仓库中存在 LuckMailSdk-Python 或已安装 luckmail-sdk")
+        if not base_url:
+            raise RuntimeError("缺少 LUCKMAIL_BASE_URL")
+        if not api_key:
+            raise RuntimeError("缺少 LUCKMAIL_API_KEY")
+        self.project_code = project_code or "openai"
+        self.email_type = email_type or "ms_graph"
+        self.domain = domain or "outlook.com"
+        self.timeout = max(30, int(timeout or 180))
+        self.poll_interval = max(1.0, float(poll_interval or 6.0))
+        self.client = LuckMailClient(
+            base_url=base_url,
+            api_key=api_key,
+            api_secret=api_secret or None,
+            use_hmac=bool(use_hmac),
+            timeout=30.0,
+        )
+        self.order = None
+        self.address = ""
+
+    def create_outlook_inbox(self) -> str:
+        try:
+            self.order = self.client.user.create_order(
+                project_code=self.project_code,
+                email_type=self.email_type,
+                domain=self.domain,
+            )
+        except LuckMailError as e:
+            raise RuntimeError(f"LuckMail 创单失败: {e}") from e
+        except Exception as e:
+            raise RuntimeError(f"LuckMail 初始化失败: {e}") from e
+        self.address = str(getattr(self.order, "email_address", "") or "").strip()
+        if not self.address:
+            raise RuntimeError("LuckMail 未返回邮箱地址")
+        print(f"[+] 生成邮箱: {self.address} (LuckMail)")
+        print(f"[*] LuckMail 订单号: {getattr(self.order, 'order_no', '')}")
+        print("[*] 自动轮询已启动（LuckMail 订单已创建）")
+        return self.address
+
+    def _poll_once(self):
+        if not self.order or not getattr(self.order, "order_no", ""):
+            raise RuntimeError("LuckMail 订单未初始化")
+        try:
+            return self.client.user.get_order_code(self.order.order_no)
+        except LuckMailError as e:
+            raise RuntimeError(f"LuckMail 查询验证码失败: {e}") from e
+
+
+def get_email_and_code_fetcher(
+    proxies: Any = None,
+    provider: str = "auto",
+    luckmail_base_url: str = "",
+    luckmail_api_key: str = "",
+    luckmail_api_secret: str = "",
+    luckmail_use_hmac: bool = False,
+    luckmail_project_code: str = "",
+    luckmail_email_type: str = "",
+    luckmail_domain: str = "",
+    luckmail_order_timeout: int = 180,
+    luckmail_poll_interval: float = 6.0,
+):
     provider = (provider or "auto").strip().lower()
-    if provider not in {"auto", "gptmail", "tempmail"}:
+    if provider not in {"auto", "gptmail", "tempmail", "luckmail"}:
         raise ValueError(f"不支持的邮箱提供商: {provider}")
 
     def _build_tempmail_bundle():
@@ -207,11 +299,79 @@ def get_email_and_code_fetcher(proxies: Any = None, provider: str = "auto"):
 
         return email, _gen_password(), fetch_code, _extract_all_codes, "gptmail"
 
+    def _build_luckmail_bundle():
+        inbox = LuckMailInbox(
+            base_url=(luckmail_base_url or LUCKMAIL_BASE_URL),
+            api_key=(luckmail_api_key or LUCKMAIL_API_KEY),
+            api_secret=(luckmail_api_secret or LUCKMAIL_API_SECRET),
+            use_hmac=bool(luckmail_use_hmac or LUCKMAIL_USE_HMAC),
+            project_code=(luckmail_project_code or LUCKMAIL_PROJECT_CODE),
+            email_type=(luckmail_email_type or LUCKMAIL_EMAIL_TYPE),
+            domain=(luckmail_domain or LUCKMAIL_DOMAIN),
+            timeout=(luckmail_order_timeout or LUCKMAIL_ORDER_TIMEOUT),
+            poll_interval=(luckmail_poll_interval or LUCKMAIL_POLL_INTERVAL),
+        )
+        email = inbox.create_outlook_inbox()
+        generated_password = _gen_password()
+
+        def _extract_all_codes() -> List[str]:
+            try:
+                result = inbox._poll_once()
+                body = " ".join([
+                    str(getattr(result, "verification_code", "") or ""),
+                    str(getattr(result, "mail_subject", "") or ""),
+                    str(getattr(result, "mail_from", "") or ""),
+                    str(getattr(result, "mail_body_html", "") or ""),
+                ])
+                return re.findall(r"(?<!\\d)(\\d{6})(?!\\d)", body)
+            except Exception:
+                return []
+
+        def fetch_code(timeout_sec: int = 180, poll: float = 6.0, exclude_codes: Optional[List[str]] = None) -> str | None:
+            exclude = set(exclude_codes or [])
+            timeout_sec = max(30, int(timeout_sec or inbox.timeout))
+            poll = max(1.0, float(poll or inbox.poll_interval))
+            start = time.monotonic()
+            attempt = 0
+            while time.monotonic() - start < timeout_sec:
+                attempt += 1
+                try:
+                    result = inbox._poll_once()
+                    status = str(getattr(result, "status", "") or "pending")
+                    print(f"[otp][luckmail] 轮询 #{attempt}, 状态: {status}, 目标: {email}")
+                    codes = []
+                    verification_code = str(getattr(result, "verification_code", "") or "").strip()
+                    if verification_code:
+                        codes.append(verification_code)
+                    body = " ".join([
+                        str(getattr(result, "mail_subject", "") or ""),
+                        str(getattr(result, "mail_from", "") or ""),
+                        str(getattr(result, "mail_body_html", "") or ""),
+                    ])
+                    codes.extend(re.findall(r"(?<!\\d)(\\d{6})(?!\\d)", body))
+                    for code in codes:
+                        if code and code not in exclude:
+                            return code
+                    if status in {"timeout", "cancelled"}:
+                        return None
+                except Exception as e:
+                    print(f"[otp][luckmail] 轮询异常: {e}")
+                time.sleep(poll)
+            return None
+
+        return email, generated_password, fetch_code, _extract_all_codes, "luckmail"
+
     if provider == "tempmail":
         return _build_tempmail_bundle()
     if provider == "gptmail":
         return _build_gptmail_bundle()
+    if provider == "luckmail":
+        return _build_luckmail_bundle()
 
+    try:
+        return _build_luckmail_bundle()
+    except Exception as e:
+        print(f"[邮箱] LuckMail 初始化失败，回退 TempMail.lol: {e}")
     try:
         return _build_tempmail_bundle()
     except Exception as e:
@@ -996,7 +1156,19 @@ def _remove_account_entry(accounts_path: Path, email: str, real_pwd: str):
 
 # ========== 主注册流程 (恢复详细日志与异常捕获) ==========
 
-def run(proxy: Optional[str], mail_provider: str = "auto"):
+def run(
+    proxy: Optional[str],
+    mail_provider: str = "auto",
+    luckmail_base_url: str = "",
+    luckmail_api_key: str = "",
+    luckmail_api_secret: str = "",
+    luckmail_use_hmac: bool = False,
+    luckmail_project_code: str = "",
+    luckmail_email_type: str = "",
+    luckmail_domain: str = "",
+    luckmail_order_timeout: int = 180,
+    luckmail_poll_interval: float = 6.0,
+):
     proxies = {"http": proxy, "https": proxy} if proxy else None
     s = requests.Session(proxies=proxies, impersonate="chrome")
     s.headers.update({
@@ -1007,7 +1179,19 @@ def run(proxy: Optional[str], mail_provider: str = "auto"):
     print(f"\n{'='*20} 开启注册流程 {'='*20}")
     try:
         print(f"[步骤1] 正在初始化临时邮箱（provider={mail_provider}）...")
-        email, password, code_fetcher, extract_all_codes, actual_mail_provider = get_email_and_code_fetcher(proxies, provider=mail_provider)
+        email, password, code_fetcher, extract_all_codes, actual_mail_provider = get_email_and_code_fetcher(
+            proxies,
+            provider=mail_provider,
+            luckmail_base_url=luckmail_base_url,
+            luckmail_api_key=luckmail_api_key,
+            luckmail_api_secret=luckmail_api_secret,
+            luckmail_use_hmac=luckmail_use_hmac,
+            luckmail_project_code=luckmail_project_code,
+            luckmail_email_type=luckmail_email_type,
+            luckmail_domain=luckmail_domain,
+            luckmail_order_timeout=luckmail_order_timeout,
+            luckmail_poll_interval=luckmail_poll_interval,
+        )
         print(f"[*] 当前邮箱提供商: {actual_mail_provider}")
         if not email:
             print("[失败] 未能获取邮箱")
@@ -1316,10 +1500,19 @@ def run(proxy: Optional[str], mail_provider: str = "auto"):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--proxy", help="代理地址")
-    parser.add_argument("--mail-provider", choices=["auto", "gptmail", "tempmail"], default="auto", help="临时邮箱提供商：auto/gptmail/tempmail")
+    parser.add_argument("--mail-provider", choices=["auto", "gptmail", "tempmail", "luckmail"], default="auto", help="临时邮箱提供商：auto/luckmail/gptmail/tempmail")
     parser.add_argument("--once", action="store_true", help="只运行一次")
     parser.add_argument("--sleep-min", type=int, default=5, help="最小间隔(秒)")
     parser.add_argument("--sleep-max", type=int, default=30, help="最大间隔(秒)")
+    parser.add_argument("--luckmail-base-url", default=os.getenv("LUCKMAIL_BASE_URL"), help="LuckMail 平台地址")
+    parser.add_argument("--luckmail-api-key", default=os.getenv("LUCKMAIL_API_KEY"), help="LuckMail API Key")
+    parser.add_argument("--luckmail-api-secret", default=os.getenv("LUCKMAIL_API_SECRET"), help="LuckMail API Secret（可选）")
+    parser.add_argument("--luckmail-use-hmac", action="store_true", help="LuckMail 使用 HMAC 鉴权")
+    parser.add_argument("--luckmail-project-code", default=os.getenv("LUCKMAIL_PROJECT_CODE", "openai"), help="LuckMail 项目编码")
+    parser.add_argument("--luckmail-email-type", default=os.getenv("LUCKMAIL_EMAIL_TYPE", "ms_graph"), help="LuckMail 邮箱类型")
+    parser.add_argument("--luckmail-domain", default=os.getenv("LUCKMAIL_DOMAIN", "outlook.com"), help="LuckMail 指定邮箱域名")
+    parser.add_argument("--luckmail-order-timeout", type=int, default=int(os.getenv("LUCKMAIL_ORDER_TIMEOUT", "180")), help="LuckMail 接码等待超时(秒)")
+    parser.add_argument("--luckmail-poll-interval", type=float, default=float(os.getenv("LUCKMAIL_POLL_INTERVAL", "6")), help="LuckMail 轮询间隔(秒)")
 
     parser.add_argument("--sub2api-base-url", default=os.getenv("SUB2API_BASE_URL"), help="Sub2API 基础地址")
     parser.add_argument("--sub2api-admin-api-key", default=os.getenv("SUB2API_ADMIN_API_KEY"), help="Sub2API 管理端全局 API Key（优先使用）")
@@ -1377,7 +1570,19 @@ def main():
                 time.sleep(wait_time)
                 continue
 
-        res = run(args.proxy, args.mail_provider)
+        res = run(
+            args.proxy,
+            args.mail_provider,
+            luckmail_base_url=args.luckmail_base_url,
+            luckmail_api_key=args.luckmail_api_key,
+            luckmail_api_secret=args.luckmail_api_secret,
+            luckmail_use_hmac=args.luckmail_use_hmac,
+            luckmail_project_code=args.luckmail_project_code,
+            luckmail_email_type=args.luckmail_email_type,
+            luckmail_domain=args.luckmail_domain,
+            luckmail_order_timeout=args.luckmail_order_timeout,
+            luckmail_poll_interval=args.luckmail_poll_interval,
+        )
         if res:
             token_json, email, real_pwd = res
             print(f"[🎉] 成功! {email} ---- {real_pwd}")
